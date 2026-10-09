@@ -55,18 +55,13 @@ func New(cfg config.Config) (*App, error) {
 		_ = logger.Sync()
 		return nil, err
 	}
-	instructions, err := workflow.LoadInstructions(cfg.Orpheus.InstructionFiles, cfg.MaxSessionRequestBytes)
+	workflows, err := workflow.Load(cfg.WorkflowsDir, cfg.MaxSessionRequestBytes)
 	if err != nil {
 		_ = logger.Sync()
 		return nil, err
 	}
 	contractOptions := workflow.Options{
 		GitLabHost:         cfg.GitLab.BaseURL,
-		Instructions:       instructions,
-		AgentProfile:       cfg.Orpheus.AgentProfile,
-		AgentModel:         cfg.Orpheus.AgentModel,
-		SandboxTemplate:    cfg.Orpheus.SandboxTemplate,
-		Services:           cfg.Orpheus.Services,
 		RunTimeoutSeconds:  int(cfg.RunTimeout / time.Second),
 		HookTimeoutSeconds: int(cfg.HookTimeout / time.Second),
 		MaxRequestBytes:    cfg.MaxSessionRequestBytes,
@@ -77,13 +72,19 @@ func New(cfg config.Config) (*App, error) {
 		gitLabClient,
 		orpheusClient,
 		func(input review.Input) (workflow.SessionContract, error) {
-			return workflow.BuildSessionContract(input, contractOptions)
+			definition, ok := workflows.Select(input.MergeRequest.ProjectID)
+			if !ok {
+				return workflow.SessionContract{}, errors.New("no workflow configured for project")
+			}
+			return workflow.BuildSessionContract(input, definition.Options(contractOptions))
 		},
 		connector.ReconcilerConfig{
-			WorkerCount:   cfg.ReconcileWorkerCount,
-			QueueCapacity: cfg.ReconcileQueueCapacity,
-			MaxConcurrent: cfg.MaxConcurrentReviews,
-			Publisher:     publication.New(logger, gitLabClient, cfg.GitLab.BaseURL, cfg.Orpheus.WebBaseURL),
+			NotesForProject: workflows.NotesForProject,
+			MatchesWorkflow: func(projectID int64) bool { _, ok := workflows.Select(projectID); return ok },
+			WorkerCount:     cfg.ReconcileWorkerCount,
+			QueueCapacity:   cfg.ReconcileQueueCapacity,
+			MaxConcurrent:   cfg.MaxConcurrentReviews,
+			Publisher:       publication.New(logger, gitLabClient, cfg.GitLab.BaseURL, cfg.Orpheus.WebBaseURL),
 		},
 	)
 	watcher := connector.NewWatcher(logger, gitLabClient, reconciler, connector.WatcherConfig{

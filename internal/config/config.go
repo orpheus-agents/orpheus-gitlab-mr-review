@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +18,6 @@ const maximumSessionRequestBytes = 16 << 20
 const maximumReconcileWorkerCount = 64
 const maximumReconcileQueueCapacity = 4096
 const maximumConcurrentReviews = 1024
-
-var serviceCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 const (
 	ModeDevelopment Mode = "dev"
@@ -43,6 +40,7 @@ type Config struct {
 	ReconcileWorkerCount   int
 	ReconcileQueueCapacity int
 	MaxConcurrentReviews   int
+	WorkflowsDir           string
 	GitLab                 GitLab
 	Orpheus                Orpheus
 }
@@ -53,14 +51,9 @@ type GitLab struct {
 }
 
 type Orpheus struct {
-	BaseURL          string
-	WebBaseURL       string
-	APIKey           string
-	AgentProfile     string
-	AgentModel       string
-	SandboxTemplate  string
-	Services         []string
-	InstructionFiles []string
+	BaseURL    string
+	WebBaseURL string
+	APIKey     string
 }
 
 func Load() (Config, error) {
@@ -76,7 +69,7 @@ func Load() (Config, error) {
 	v.SetDefault("reconcile_worker_count", 4)
 	v.SetDefault("reconcile_queue_capacity", 128)
 	v.SetDefault("max_concurrent_reviews", 4)
-	v.SetDefault("orpheus_services", "gitlab")
+	v.SetDefault("workflows_dir", "workflows")
 	v.AutomaticEnv()
 
 	if _, err := os.Stat(".env"); err == nil {
@@ -158,26 +151,13 @@ func Load() (Config, error) {
 	if orpheusAPIKey == "" {
 		return Config{}, errors.New("ORPHEUS_API_KEY is required")
 	}
-	agentProfile := strings.TrimSpace(v.GetString("orpheus_agent_profile"))
-	if agentProfile == "" {
-		return Config{}, errors.New("ORPHEUS_AGENT_PROFILE is required")
+	workflowsDir := v.GetString("workflows_dir")
+	if value, present := os.LookupEnv("WORKFLOWS_DIR"); present {
+		workflowsDir = value
 	}
-	sandboxTemplate := strings.TrimSpace(v.GetString("orpheus_sandbox_template"))
-	if sandboxTemplate == "" {
-		return Config{}, errors.New("ORPHEUS_SANDBOX_TEMPLATE is required")
-	}
-	instructionFiles, err := parseOrderedList("ORPHEUS_AGENT_INSTRUCTION_FILES", v.GetString("orpheus_agent_instruction_files"))
-	if err != nil {
-		return Config{}, err
-	}
-	servicesValue := v.GetString("orpheus_services")
-	// Viper ignores empty environment values; an explicit empty list disables services.
-	if value, exists := os.LookupEnv("ORPHEUS_SERVICES"); exists {
-		servicesValue = value
-	}
-	services, err := parseServices(servicesValue)
-	if err != nil {
-		return Config{}, err
+	workflowsDir = strings.TrimSpace(workflowsDir)
+	if workflowsDir == "" {
+		return Config{}, errors.New("WORKFLOWS_DIR is required")
 	}
 
 	return Config{
@@ -192,19 +172,15 @@ func Load() (Config, error) {
 		ReconcileWorkerCount:   reconcileWorkerCount,
 		ReconcileQueueCapacity: reconcileQueueCapacity,
 		MaxConcurrentReviews:   maxConcurrentReviews,
+		WorkflowsDir:           workflowsDir,
 		GitLab: GitLab{
 			BaseURL: gitLabBaseURL,
 			Token:   gitLabToken,
 		},
 		Orpheus: Orpheus{
-			BaseURL:          orpheusBaseURL,
-			WebBaseURL:       orpheusWebBaseURL,
-			APIKey:           orpheusAPIKey,
-			AgentProfile:     agentProfile,
-			AgentModel:       strings.TrimSpace(v.GetString("orpheus_agent_model")),
-			SandboxTemplate:  sandboxTemplate,
-			Services:         services,
-			InstructionFiles: instructionFiles,
+			BaseURL:    orpheusBaseURL,
+			WebBaseURL: orpheusWebBaseURL,
+			APIKey:     orpheusAPIKey,
 		},
 	}, nil
 }
@@ -249,43 +225,6 @@ func parsePositiveInt(name, value string, maximum int) (int, error) {
 	}
 
 	return int(parsed), nil
-}
-
-func parseServices(value string) ([]string, error) {
-	if strings.TrimSpace(value) == "" {
-		return nil, nil
-	}
-	services, err := parseOrderedList("ORPHEUS_SERVICES", value)
-	if err != nil {
-		return nil, err
-	}
-	for _, service := range services {
-		if !serviceCodePattern.MatchString(service) {
-			return nil, fmt.Errorf("ORPHEUS_SERVICES contains invalid service code %q", service)
-		}
-	}
-	return services, nil
-}
-
-func parseOrderedList(name, value string) ([]string, error) {
-	seen := make(map[string]struct{})
-	var values []string
-	for _, candidate := range strings.Split(value, ",") {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
-		if _, exists := seen[candidate]; exists {
-			return nil, fmt.Errorf("%s contains duplicate value %q", name, candidate)
-		}
-		seen[candidate] = struct{}{}
-		values = append(values, candidate)
-	}
-	if len(values) == 0 {
-		return nil, fmt.Errorf("%s is required", name)
-	}
-
-	return values, nil
 }
 
 func parseBaseURL(name, value string) (string, error) {

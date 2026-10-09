@@ -21,8 +21,9 @@ type serviceStub struct {
 
 func TestNewRegistersIndependentWatcherAndReconcilerServices(t *testing.T) {
 	instructionsPath := filepath.Join(t.TempDir(), "instructions.md")
-	require.NoError(t, os.WriteFile(instructionsPath, []byte("# Project policy\n\nReview the pinned diff.\n"), 0o600))
+	require.NoError(t, os.WriteFile(instructionsPath, []byte("---\nid: project-review\nprofile: review-profile\nsandbox_template: review-sandbox\nservices: []\n---\n# Project policy\n\nReview the pinned diff.\n"), 0o600))
 	application, err := New(config.Config{
+		WorkflowsDir:           filepath.Dir(instructionsPath),
 		LogLevel:               "debug",
 		HTTPTimeout:            time.Second,
 		PollInterval:           time.Minute,
@@ -38,11 +39,8 @@ func TestNewRegistersIndependentWatcherAndReconcilerServices(t *testing.T) {
 			Token:   "gitlab-token",
 		},
 		Orpheus: config.Orpheus{
-			BaseURL:          "https://orpheus.example.com",
-			APIKey:           "orpheus-token",
-			AgentProfile:     "review-profile",
-			SandboxTemplate:  "review-sandbox",
-			InstructionFiles: []string{instructionsPath},
+			BaseURL: "https://orpheus.example.com",
+			APIKey:  "orpheus-token",
 		},
 	})
 	require.NoError(t, err)

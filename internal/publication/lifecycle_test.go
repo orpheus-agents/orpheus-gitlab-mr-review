@@ -2,11 +2,14 @@ package publication
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/protocol"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -117,13 +120,16 @@ func TestErrorPublicationWithoutSessionAndAfterUncertainResponse(t *testing.T) {
 }
 
 func TestTerminalMarkersRequireOwnedTrailingNote(t *testing.T) {
-	for _, markerKind := range []string{"completion", "error"} {
+	for _, markerKind := range []string{"completion", "error", "skipped"} {
 		for _, forged := range []string{"other_author", "not_trailing"} {
 			t.Run(markerKind+"/"+forged, func(t *testing.T) {
 				input, client := publicationFixture(t)
 				marker := CompletionMarker(input.ReviewFingerprint)
 				if markerKind == "error" {
 					marker = ErrorMarker(input.ReviewFingerprint)
+				}
+				if markerKind == "skipped" {
+					marker = SkippedMarker(review.AssignmentKey(input))
 				}
 				note := gitlab.Note{Author: input.Reviewer, Body: marker}
 				if forged == "other_author" {
@@ -198,4 +204,113 @@ func TestFallbackMarkerSurvivesRetryBeforeCompletion(t *testing.T) {
 	client.afterMutation, client.createNoteErr = nil, nil
 	require.NoError(t, New(zap.NewNop(), client, "https://gitlab.example.test").Publish(t.Context(), input, bundle))
 	require.Len(t, client.discussions, 2, "one fallback and one completion")
+}
+
+func TestSkipPublicationRecoversRemovalAndDoesNotDuplicateNote(t *testing.T) {
+	input, client := publicationFixture(t)
+	client.removeErr = context.DeadlineExceeded
+	publisher := New(zap.NewNop(), client, "https://gitlab.example.test")
+	require.True(t, IsRetryable(publisher.PublishSkipped(t.Context(), input)))
+	require.Equal(t, 1, client.createdNotes)
+	body := client.discussions[0].Notes[0].Body
+	require.Contains(t, body, "⏭️")
+	require.Contains(t, body, "no workflow is configured for this project")
+	require.Equal(t, SkippedMarker(review.AssignmentKey(input)), trailingMarker(body))
+	require.False(t, client.removedReviewer)
+	client.removeErr = nil
+	finalized, err := New(zap.NewNop(), client, "https://gitlab.example.test").Finalize(t.Context(), input)
+	require.NoError(t, err)
+	require.True(t, finalized)
+	require.Equal(t, 1, client.createdNotes)
+	require.True(t, client.removedReviewer)
+	require.NoError(t, publisher.PublishSkipped(t.Context(), input))
+	require.Equal(t, 1, client.createdNotes)
+}
+
+func TestSkipPublicationVerifiesNoteBeforeRemovingReviewer(t *testing.T) {
+	for _, state := range []string{"uncertain_accepted", "unconfirmed", "diff_changed"} {
+		t.Run(state, func(t *testing.T) {
+			input, client := publicationFixture(t)
+			switch state {
+			case "uncertain_accepted":
+				client.createNoteErr, client.createNoteAccepted = context.DeadlineExceeded, true
+			case "unconfirmed":
+				client.hideCreatedNotes = true
+			case "diff_changed":
+				client.afterMutation = func() { client.mergeRequest.DiffRefs.HeadSHA = strings.Repeat("d", 40) }
+			}
+			err := New(zap.NewNop(), client, "https://gitlab.example.test").PublishSkipped(t.Context(), input)
+			if state == "uncertain_accepted" {
+				require.NoError(t, err)
+				require.True(t, client.removedReviewer)
+			} else {
+				require.Error(t, err)
+				require.False(t, client.removedReviewer)
+			}
+		})
+	}
+}
+
+func TestSkipMarkerDoesNotSuppressExplicitNewAssignment(t *testing.T) {
+	input, client := publicationFixture(t)
+	publisher := New(zap.NewNop(), client, "https://gitlab.example.test")
+	require.NoError(t, publisher.PublishSkipped(t.Context(), input))
+	input.ReviewFingerprint = strings.Repeat("f", 64)
+	input.Notes = append(input.Notes, gitlab.Note{ID: 99, System: true, Body: "requested review from @" + input.Reviewer.Username, CreatedAt: time.Now()})
+	finalized, err := publisher.Finalize(t.Context(), input)
+	require.NoError(t, err)
+	require.False(t, finalized)
+	require.NoError(t, publisher.PublishSkipped(t.Context(), input))
+	require.Equal(t, 2, client.createdNotes)
+}
+
+func TestSkipTerminalSurvivesUnrelatedHumanActivity(t *testing.T) {
+	input, client := publicationFixture(t)
+	client.removeErr = context.DeadlineExceeded
+	publisher := New(zap.NewNop(), client, "https://gitlab.example.test")
+	require.True(t, IsRetryable(publisher.PublishSkipped(t.Context(), input)))
+	input.ReviewFingerprint = strings.Repeat("f", 64)
+	input.Notes = append(input.Notes, gitlab.Note{ID: 99, Body: "Additional context", Resolvable: true, CreatedAt: time.Now()})
+	client.removeErr = nil
+	finalized, err := New(zap.NewNop(), client, "https://gitlab.example.test").Finalize(t.Context(), input)
+	require.NoError(t, err)
+	require.True(t, finalized)
+	require.Equal(t, 1, client.createdNotes)
+	require.True(t, client.removedReviewer)
+}
+
+func TestCustomFailureNoteUsesSanitizedReasonAndServiceMarker(t *testing.T) {
+	input, client := publicationFixture(t)
+	failure := Failure{Code: "secret token raw stack", SessionID: "00000000-0000-4000-8000-000000000001", Notes: review.NoteTemplates{Fail: "⚠️ Ошибка: {{ .Reason }}.\n\n[Details]({{ .SessionURL }})"}}
+	client.removeErr = context.DeadlineExceeded
+	publisher := New(zap.NewNop(), client, "https://gitlab.example.test", "https://orpheus.example.test")
+	require.True(t, IsRetryable(publisher.PublishError(t.Context(), input, failure)))
+	body := client.discussions[0].Notes[0].Body
+	require.Contains(t, body, "⚠️ Ошибка: the review result could not be safely validated or published.")
+	require.NotContains(t, body, failure.Code)
+	require.Contains(t, body, "https://orpheus.example.test/sessions/"+failure.SessionID)
+	require.Equal(t, ErrorMarker(input.ReviewFingerprint), trailingMarker(body))
+	client.removeErr = nil
+	// New templates cannot change an already confirmed terminal note on retry.
+	failure.Notes.Fail = "Changed message"
+	require.NoError(t, New(zap.NewNop(), client, "https://gitlab.example.test").PublishError(t.Context(), input, failure))
+	require.Equal(t, 1, client.createdNotes)
+	require.True(t, client.removedReviewer)
+}
+
+func TestCustomSuccessNoteUsesCountsAndServiceMarker(t *testing.T) {
+	for _, count := range []int{0, 1} {
+		input, client := publicationFixture(t)
+		findings := []protocol.Finding{}
+		if count > 0 {
+			findings = append(findings, publicationFinding(nil))
+		}
+		bundle := publicationBundle(input, findings)
+		notes := review.NoteTemplates{Success: "✅ Проверка завершена. Находок: {{ .FindingsCount }}."}
+		require.NoError(t, New(zap.NewNop(), client, "https://gitlab.example.test").Publish(t.Context(), input, bundle, notes))
+		body := client.discussions[len(client.discussions)-1].Notes[0].Body
+		require.Contains(t, body, "✅ Проверка завершена. Находок: "+strconv.Itoa(count)+".")
+		require.Equal(t, CompletionMarker(input.ReviewFingerprint), trailingMarker(body))
+		require.True(t, client.removedReviewer)
+	}
 }

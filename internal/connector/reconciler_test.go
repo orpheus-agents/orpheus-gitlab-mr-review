@@ -68,9 +68,11 @@ type gitLabReviewSourceStub struct {
 }
 
 type reviewPublisherStub struct {
+	skippedCalls int
 	calls        int
 	input        review.Input
 	bundle       protocol.Bundle
+	notes        review.NoteTemplates
 	err          error
 	errorCalls   int
 	failure      publication.Failure
@@ -95,10 +97,13 @@ func (s *reviewPublisherStub) Discard(context.Context, review.Input) error {
 	return s.err
 }
 
-func (s *reviewPublisherStub) Publish(_ context.Context, input review.Input, bundle protocol.Bundle) error {
+func (s *reviewPublisherStub) Publish(_ context.Context, input review.Input, bundle protocol.Bundle, notes ...review.NoteTemplates) error {
 	s.calls++
 	s.input = input
 	s.bundle = bundle
+	if len(notes) > 0 {
+		s.notes = notes[0]
+	}
 	return s.err
 }
 
@@ -262,7 +267,7 @@ func TestReconcilerContinuesFailedSessionAfterReviewFingerprintChanges(t *testin
 	reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		t.Fatal("an existing assignment must not start another analysis")
 		return workflow.SessionContract{}, nil
-	}, ReconcilerConfig{Publisher: publisher})
+	}, ReconcilerConfig{Publisher: publisher, MatchesWorkflow: func(int64) bool { t.Fatal("old assignment must not select a new workflow"); return false }})
 
 	err := reconciler.Reconcile(t.Context(), current)
 
@@ -325,6 +330,9 @@ func TestReconcilerValidatesCompletedBundleAgainstImmutableMetadata(t *testing.T
 	input := eligibleReviewInput()
 	input.MergeRequest.WebURL = "https://gitlab.example.com/team/project/-/merge_requests/2989"
 	contract, err := workflow.BuildSessionContract(input, workflow.Options{
+		WorkflowID:         "retired-workflow",
+		Notes:              review.NoteTemplates{Success: "Saved workflow completion: {{ .FindingsCount }}"},
+		Services:           []string{},
 		GitLabHost:         "https://gitlab.example.com",
 		Instructions:       "# Policy\n\nReview the pinned diff.\n",
 		AgentProfile:       "review-profile",
@@ -379,7 +387,10 @@ func TestReconcilerValidatesCompletedBundleAgainstImmutableMetadata(t *testing.T
 	reconciler := NewReconciler(zap.New(core), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		t.Fatal("completed session must not build a new contract")
 		return workflow.SessionContract{}, nil
-	}, ReconcilerConfig{Publisher: publisher})
+	}, ReconcilerConfig{Publisher: publisher, MatchesWorkflow: func(int64) bool {
+		t.Fatal("accepted session must be recovered even after workflow removal")
+		return false
+	}})
 
 	err = reconciler.Reconcile(context.Background(), input)
 
@@ -389,6 +400,7 @@ func TestReconcilerValidatesCompletedBundleAgainstImmutableMetadata(t *testing.T
 	require.Equal(t, 1, publisher.calls)
 	require.Equal(t, input, publisher.input)
 	require.Equal(t, bundle, publisher.bundle)
+	require.Equal(t, "Saved workflow completion: {{ .FindingsCount }}", publisher.notes.Success)
 	require.Equal(t, 1, logs.FilterMessage("completed GitLab review publication").Len())
 }
 
@@ -630,6 +642,7 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 	input.MergeRequest.WebURL = "https://gitlab.example.com/team/project/-/merge_requests/2989"
 	reconciler := NewReconciler(zap.NewNop(), nil, client, func(input review.Input) (workflow.SessionContract, error) {
 		return workflow.BuildSessionContract(input, workflow.Options{
+			WorkflowID:         "retired-workflow",
 			GitLabHost:         "https://gitlab.example.com",
 			Instructions:       "# Project policy\n\nReview the pinned diff.\n",
 			AgentProfile:       "review-profile",
@@ -1087,7 +1100,7 @@ func recoveredMetadata(t *testing.T, input review.Input) json.RawMessage {
 	t.Helper()
 	metadata := workflow.MetadataV1{
 		SchemaVersion:    workflow.MetadataSchemaVersion,
-		WorkflowID:       workflow.ID,
+		WorkflowID:       "retired-workflow",
 		WorkflowRevision: "sha256:" + strings.Repeat("a", 64),
 		GitLab: workflow.GitLabMetadata{
 			Host:             "https://gitlab.example.com",
@@ -1116,4 +1129,10 @@ func recoveredMetadata(t *testing.T, input review.Input) json.RawMessage {
 	raw, err := json.Marshal(metadata)
 	require.NoError(t, err)
 	return raw
+}
+
+func (s *reviewPublisherStub) PublishSkipped(_ context.Context, input review.Input) error {
+	s.skippedCalls++
+	s.input = input
+	return s.err
 }

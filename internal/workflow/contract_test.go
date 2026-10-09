@@ -26,7 +26,7 @@ func TestBuildSessionContract(t *testing.T) {
 
 	input := contractReviewInput()
 	options := contractOptions()
-	revision, err := Revision(options.Instructions)
+	revision, err := Revision(options)
 	require.NoError(t, err)
 	contract, err := BuildSessionContract(input, options)
 
@@ -39,7 +39,7 @@ func TestBuildSessionContract(t *testing.T) {
 	require.Equal(t, ".orpheus/reviews/"+input.DiffFingerprint, contract.Metadata.Review.ArtifactsPath)
 	require.Equal(t, MetadataV1{
 		SchemaVersion:    1,
-		WorkflowID:       ID,
+		WorkflowID:       "project-review",
 		WorkflowRevision: revision,
 		GitLab: GitLabMetadata{
 			Host:             "https://gitlab.example.com",
@@ -83,7 +83,11 @@ func TestBuildSessionContract(t *testing.T) {
 	require.Equal(t, "gitlab-mr-review-input-v1:"+input.ReviewFingerprint, *request.Messages[0].ExternalKey)
 	require.Equal(t, contract.Prompt, request.Messages[0].Text)
 	require.Contains(t, contract.Prompt, "Review GitLab merge request `!2989`")
-	require.Contains(t, contract.Prompt, "git diff \"$ORPHEUS_GITLAB_DIFF_BASE_SHA\"")
+	require.Contains(t, contract.Prompt, "ORPHEUS_GITLAB_DIFF_BASE_SHA")
+	require.Contains(t, contract.Prompt, `git diff "$ORPHEUS_GITLAB_DIFF_BASE_SHA"..."$ORPHEUS_GITLAB_DIFF_HEAD_SHA"`)
+	require.Contains(t, contract.Prompt, `git log "$ORPHEUS_GITLAB_DIFF_BASE_SHA".."$ORPHEUS_GITLAB_DIFF_HEAD_SHA" --oneline`)
+	require.Contains(t, contract.Prompt, "leave it unresolved so")
+	require.NotContains(t, contract.Prompt, testInstructions)
 	require.Contains(t, contract.Prompt, input.ReviewFingerprint)
 
 	var messageMetadata MetadataV1
@@ -91,7 +95,7 @@ func TestBuildSessionContract(t *testing.T) {
 	require.Equal(t, contract.Metadata, messageMetadata)
 	require.JSONEq(t, fmt.Sprintf(`{
 		"schema_version": 1,
-		"workflow_id": "gitlab-mr-review",
+		"workflow_id": "project-review",
 		"workflow_revision": %q,
 		"gitlab": {
 			"host": "https://gitlab.example.com",
@@ -121,18 +125,18 @@ func TestBuildSessionContract(t *testing.T) {
 	require.Equal(t, len(encodedRequest), contract.RequestBytes)
 }
 
-func TestBuildSessionContractOmitsUnselectedServices(t *testing.T) {
+func TestBuildSessionContractSendsExplicitEmptyServices(t *testing.T) {
 	t.Parallel()
-
-	for _, services := range [][]string{nil, {}} {
-		options := contractOptions()
-		options.Services = services
-		contract, err := BuildSessionContract(contractReviewInput(), options)
-		require.NoError(t, err)
-		encoded, err := json.Marshal(contract.Request)
-		require.NoError(t, err)
-		require.NotContains(t, string(encoded), `"services"`)
-	}
+	options := contractOptions()
+	options.Services = []string{}
+	contract, err := BuildSessionContract(contractReviewInput(), options)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(contract.Request)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"services":[]`)
+	options.Services = nil
+	_, err = BuildSessionContract(contractReviewInput(), options)
+	require.ErrorContains(t, err, "services must be explicitly configured")
 }
 
 func TestBuildSessionContractRequiresHTTPSCloneURL(t *testing.T) {
@@ -207,13 +211,13 @@ func TestBuildSessionContractEnforcesMaximumRequestSize(t *testing.T) {
 func TestWorkflowRevisionCoversExternalInstructionsAndEmbeddedAssets(t *testing.T) {
 	t.Parallel()
 
-	revision, err := Revision(testInstructions)
+	revision, err := Revision(contractOptions())
 	require.NoError(t, err)
 	require.Regexp(t, `^sha256:[0-9a-f]{64}$`, revision)
-	changedInstructions, err := Revision(testInstructions + "Additional rule.\n")
+	changedInstructions, err := Revision(Options{Instructions: testInstructions + "Additional rule.\n"})
 	require.NoError(t, err)
 	require.NotEqual(t, revision, changedInstructions)
-	_, err = Revision(" \n")
+	_, err = Revision(Options{Instructions: " \n"})
 	require.EqualError(t, err, "build workflow revision: instructions are required")
 
 	base := revisionForParts("first", "second")
@@ -224,7 +228,9 @@ func TestWorkflowRevisionCoversExternalInstructionsAndEmbeddedAssets(t *testing.
 func TestEmbeddedHelperProducesBundleAcceptedByConnector(t *testing.T) {
 	t.Parallel()
 
-	contract, err := BuildSessionContract(contractReviewInput(), contractOptions())
+	options := contractOptions()
+	options.Notes = review.NoteTemplates{Success: "✅ Completed: {{ .FindingsCount }}", Fail: "⚠️ Failed: {{ .Reason }}"}
+	contract, err := BuildSessionContract(contractReviewInput(), options)
 	require.NoError(t, err)
 	directory := t.TempDir()
 	reviewDirectory := filepath.Join(directory, "review")
@@ -399,33 +405,12 @@ func TestEmbeddedPromptOwnsCoreOperatingContractAndIsEnglish(t *testing.T) {
 	cyrillic := regexp.MustCompile(`\p{Cyrillic}`)
 	require.False(t, cyrillic.MatchString(promptAsset))
 	require.Contains(t, promptAsset, "## Operating mode")
+	require.Contains(t, promptAsset, "## Pinned diff")
 	require.Contains(t, promptAsset, "GitLab mutations are forbidden")
 	require.Contains(t, promptAsset, "## Review artifacts")
 	require.Contains(t, promptAsset, "## Completion")
 	require.NotContains(t, promptAsset, "Kubernetes compliance")
 	require.NotContains(t, promptAsset, "analysis retry")
-}
-
-func TestLoadInstructionsCombinesMountedMarkdownFiles(t *testing.T) {
-	t.Parallel()
-
-	directory := t.TempDir()
-	compliancePath := filepath.Join(directory, "compliance.md")
-	projectPath := filepath.Join(directory, "project.md")
-	require.NoError(t, os.WriteFile(compliancePath, []byte("# Compliance\n\nRun required checks."), 0o600))
-	require.NoError(t, os.WriteFile(projectPath, []byte("# Project rules\n\nFollow AGENTS.md."), 0o600))
-	want := "# Compliance\n\nRun required checks.\n\n# Project rules\n\nFollow AGENTS.md."
-
-	instructions, err := LoadInstructions([]string{compliancePath, projectPath}, len(want))
-
-	require.NoError(t, err)
-	require.Equal(t, want, instructions)
-	_, err = LoadInstructions([]string{compliancePath, projectPath}, len(want)-1)
-	require.ErrorContains(t, err, "content exceeds")
-	invalidPath := filepath.Join(directory, "invalid.md")
-	require.NoError(t, os.WriteFile(invalidPath, []byte{0xff}, 0o600))
-	_, err = LoadInstructions([]string{invalidPath}, 10)
-	require.ErrorContains(t, err, "file is not UTF-8")
 }
 
 func TestMetadataRoundTripAndInputValidation(t *testing.T) {
@@ -462,6 +447,7 @@ func TestBuildSessionContractRejectsInvalidInputBeforeRendering(t *testing.T) {
 
 func contractOptions() Options {
 	return Options{
+		WorkflowID:         "project-review",
 		GitLabHost:         "https://gitlab.example.com/",
 		Instructions:       testInstructions,
 		AgentProfile:       "review-profile",

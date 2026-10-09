@@ -32,12 +32,12 @@ func TestFailuresEmitJSONAndExitOne(t *testing.T) {
 	t.Cleanup(gitLab.Close)
 
 	tests := []struct {
-		name         string
-		env          []string
-		configFile   string
-		msg          string
-		errorText    string
-		instructions bool
+		name       string
+		env        []string
+		configFile string
+		msg        string
+		errorText  string
+		workflows  bool
 	}{
 		{
 			name:      "missing configuration",
@@ -57,24 +57,24 @@ func TestFailuresEmitJSONAndExitOne(t *testing.T) {
 			errorText:  "read config:",
 		},
 		{
-			name:         "invalid logger configuration",
-			env:          []string{"LOG_LEVEL=invalid"},
-			msg:          "failed to initialize application",
-			errorText:    "parse log level:",
-			instructions: true,
+			name:      "invalid logger configuration",
+			env:       []string{"LOG_LEVEL=invalid"},
+			msg:       "failed to initialize application",
+			errorText: "parse log level:",
+			workflows: true,
 		},
 		{
-			name:      "missing instructions",
+			name:      "missing workflows",
 			env:       []string{"LOG_LEVEL=fatal"},
 			msg:       "failed to initialize application",
-			errorText: "instructions.md",
+			errorText: "workflows",
 		},
 		{
-			name:         "runtime failure",
-			env:          []string{"LOG_LEVEL=debug"},
-			msg:          "application failed",
-			errorText:    "resolve authenticated GitLab reviewer:",
-			instructions: true,
+			name:      "runtime failure",
+			env:       []string{"LOG_LEVEL=debug"},
+			msg:       "application failed",
+			errorText: "resolve authenticated GitLab reviewer:",
+			workflows: true,
 		},
 	}
 
@@ -85,8 +85,9 @@ func TestFailuresEmitJSONAndExitOne(t *testing.T) {
 			if tt.configFile != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte(tt.configFile), 0o600))
 			}
-			if tt.instructions {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("# Review policy\n"), 0o600))
+			if tt.workflows {
+				require.NoError(t, os.Mkdir(filepath.Join(dir, "workflows"), 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "workflows", "review.md"), []byte("---\nid: test-review\nprofile: test-profile\nsandbox_template: test-template\nservices: []\n---\n# Review policy\n"), 0o600))
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -106,9 +107,7 @@ func TestFailuresEmitJSONAndExitOne(t *testing.T) {
 					"GITLAB_TOKEN=test-token",
 					"ORPHEUS_BASE_URL=https://orpheus.example.com",
 					"ORPHEUS_API_KEY=test-key",
-					"ORPHEUS_AGENT_PROFILE=test-profile",
-					"ORPHEUS_SANDBOX_TEMPLATE=test-template",
-					"ORPHEUS_AGENT_INSTRUCTION_FILES=instructions.md",
+					"WORKFLOWS_DIR=workflows",
 					"HTTP_TIMEOUT_SECONDS=1",
 					"SHUTDOWN_TIMEOUT_SECONDS=1",
 				)

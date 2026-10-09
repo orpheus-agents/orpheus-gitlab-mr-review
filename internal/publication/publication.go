@@ -66,7 +66,7 @@ func New(logger *zap.Logger, client Client, gitLabHost string, webBaseURL ...str
 	return p
 }
 
-func (p *Publisher) Publish(ctx context.Context, input review.Input, bundle protocol.Bundle) error {
+func (p *Publisher) Publish(ctx context.Context, input review.Input, bundle protocol.Bundle, notes ...review.NoteTemplates) error {
 	if p.client == nil {
 		return permanent("publisher_not_configured", errors.New("GitLab publication client is missing"))
 	}
@@ -84,7 +84,8 @@ func (p *Publisher) Publish(ctx context.Context, input review.Input, bundle prot
 	if hasOwnedMarker(discussions, input.Reviewer.ID, completionMarker) {
 		return p.removeReviewer(ctx, input)
 	}
-	if hasOwnedMarker(discussions, input.Reviewer.ID, ErrorMarker(input.ReviewFingerprint)) {
+	if hasOwnedMarker(discussions, input.Reviewer.ID, ErrorMarker(input.ReviewFingerprint)) ||
+		hasOwnedMarker(discussions, input.Reviewer.ID, SkippedMarker(review.AssignmentKey(input))) {
 		return p.removeReviewer(ctx, input)
 	}
 	diffs, err := p.client.ListMergeRequestDiffs(ctx, projectID, iid)
@@ -112,6 +113,13 @@ func (p *Publisher) Publish(ctx context.Context, input review.Input, bundle prot
 	}
 
 	completionBody := completionBody(len(bundle.Confirmed), completionMarker)
+	if len(notes) > 0 && notes[0].Success != "" {
+		rendered, err := review.RenderNote(notes[0].Success, review.NoteData{FindingsCount: len(bundle.Confirmed)})
+		if err != nil {
+			return permanent("invalid_success_note", err)
+		}
+		completionBody = rendered + "\n\n" + completionMarker
+	}
 	discussions, err = p.ensureNote(ctx, input, completionBody, completionMarker, discussions)
 	if err != nil {
 		return err
@@ -289,7 +297,7 @@ func (p *Publisher) publishFindingFallback(
 	if err := p.ensureCurrent(ctx, input); err != nil {
 		return discussions, err
 	}
-	body := fmt.Sprintf("**Inline review finding for `%s:%d`**\n\n%s\n\nInline fallback: %s\n\n%s",
+	body := fmt.Sprintf("⚠️ **Inline review finding for `%s:%d`**\n\n%s\n\nInline fallback: %s\n\n%s",
 		finding.Path, finding.Line, strings.TrimSpace(strings.TrimSuffix(findingText, marker)), reason, marker)
 	return p.ensureNote(ctx, input, body, marker, discussions)
 }

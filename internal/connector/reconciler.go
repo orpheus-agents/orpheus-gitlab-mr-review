@@ -8,9 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/orpheus"
@@ -48,8 +46,9 @@ type gitLabReviewSource interface {
 type SessionContractBuilder func(input review.Input) (workflow.SessionContract, error)
 
 type ReviewPublisher interface {
-	Publish(ctx context.Context, input review.Input, bundle protocol.Bundle) error
+	Publish(ctx context.Context, input review.Input, bundle protocol.Bundle, notes ...review.NoteTemplates) error
 	PublishError(ctx context.Context, input review.Input, failure publication.Failure) error
+	PublishSkipped(ctx context.Context, input review.Input) error
 	Finalize(ctx context.Context, input review.Input) (bool, error)
 	Discard(ctx context.Context, input review.Input) error
 }
@@ -60,10 +59,12 @@ var (
 )
 
 type ReconcilerConfig struct {
-	WorkerCount   int
-	QueueCapacity int
-	MaxConcurrent int
-	Publisher     ReviewPublisher
+	NotesForProject func(projectID int64) review.NoteTemplates
+	MatchesWorkflow func(projectID int64) bool
+	WorkerCount     int
+	QueueCapacity   int
+	MaxConcurrent   int
+	Publisher       ReviewPublisher
 }
 
 type LifecyclePhase string
@@ -101,23 +102,25 @@ func IsRetryable(err error) bool {
 // lifecycle decisions for fetched review inputs. Polling remains the watcher's
 // only responsibility.
 type Reconciler struct {
-	logger         *zap.Logger
-	gitlab         gitLabReviewSource
-	orpheus        orpheusAdapter
-	buildContract  SessionContractBuilder
-	publisher      ReviewPublisher
-	workerCount    int
-	maxConcurrent  int
-	queue          chan review.Snapshot
-	stateMu        sync.Mutex
-	stopping       bool
-	runCalled      bool
-	stopOnce       sync.Once
-	stop           chan struct{}
-	started        chan struct{}
-	done           chan struct{}
-	cancelMu       sync.Mutex
-	cancelRequests context.CancelFunc
+	logger          *zap.Logger
+	gitlab          gitLabReviewSource
+	orpheus         orpheusAdapter
+	buildContract   SessionContractBuilder
+	publisher       ReviewPublisher
+	matchesWorkflow func(projectID int64) bool
+	notesForProject func(projectID int64) review.NoteTemplates
+	workerCount     int
+	maxConcurrent   int
+	queue           chan review.Snapshot
+	stateMu         sync.Mutex
+	stopping        bool
+	runCalled       bool
+	stopOnce        sync.Once
+	stop            chan struct{}
+	started         chan struct{}
+	done            chan struct{}
+	cancelMu        sync.Mutex
+	cancelRequests  context.CancelFunc
 }
 
 func NewReconciler(
@@ -142,17 +145,19 @@ func NewReconciler(
 	}
 
 	return &Reconciler{
-		logger:        logger,
-		gitlab:        gitLabClient,
-		orpheus:       client,
-		buildContract: buildContract,
-		publisher:     cfg.Publisher,
-		workerCount:   cfg.WorkerCount,
-		maxConcurrent: cfg.MaxConcurrent,
-		queue:         make(chan review.Snapshot, cfg.QueueCapacity),
-		stop:          make(chan struct{}),
-		started:       make(chan struct{}),
-		done:          make(chan struct{}),
+		logger:          logger,
+		gitlab:          gitLabClient,
+		orpheus:         client,
+		buildContract:   buildContract,
+		publisher:       cfg.Publisher,
+		matchesWorkflow: cfg.MatchesWorkflow,
+		notesForProject: cfg.NotesForProject,
+		workerCount:     cfg.WorkerCount,
+		maxConcurrent:   cfg.MaxConcurrent,
+		queue:           make(chan review.Snapshot, cfg.QueueCapacity),
+		stop:            make(chan struct{}),
+		started:         make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 }
 
@@ -591,7 +596,7 @@ func (r *Reconciler) inspectCandidate(ctx context.Context, input review.Input) (
 	if err != nil {
 		return false, lifecycleError(LifecyclePhaseRecover, lifecycleCode(err), retryable(err), err)
 	}
-	if latest != nil && !latest.CreatedAt.Before(latestAssignment(input)) {
+	if latest != nil && !latest.CreatedAt.Before(review.LatestAssignment(input)) {
 		err := r.reconcileActiveSession(ctx, input.Reviewer, map[string]review.Input{input.MRKey: input}, *latest)
 		if err != nil {
 			return false, r.finishFailure(ctx, input, *latest, err)
@@ -599,22 +604,17 @@ func (r *Reconciler) inspectCandidate(ctx context.Context, input review.Input) (
 		return false, nil
 	}
 
-	return true, nil
-}
-
-// A new explicit review request is the only event which authorizes another
-// analysis after a terminal run. Other human activity can change the input
-// fingerprint but must not silently create another run for the same assignment.
-func latestAssignment(input review.Input) time.Time {
-	var latest time.Time
-	username := "@" + strings.ToLower(input.Reviewer.Username)
-	for _, note := range input.Notes {
-		body := strings.ToLower(note.Body)
-		if note.System && strings.Contains(body, "requested review from ") && strings.Contains(body, username) && note.CreatedAt.After(latest) {
-			latest = note.CreatedAt
+	if r.matchesWorkflow != nil && !r.matchesWorkflow(input.MergeRequest.ProjectID) {
+		if r.publisher == nil {
+			return false, lifecycleError(LifecyclePhasePublish, "publisher_not_configured", false, errors.New("skip publication requires a publisher"))
 		}
+		if err := r.publisher.PublishSkipped(ctx, input); err != nil {
+			return false, publicationLifecycleError(err)
+		}
+		r.logger.Info("skipped review without a matching workflow", zap.String("merge_request_key", input.MRKey))
+		return false, nil
 	}
-	return latest
+	return true, nil
 }
 
 func (r *Reconciler) createSession(ctx context.Context, input review.Input) error {
@@ -655,7 +655,7 @@ func (r *Reconciler) reconcileSession(ctx context.Context, input review.Input, s
 	case "accepted", "starting", "running", "cancelling", "finalizing":
 		r.logger.Debug("Orpheus review session is still in progress", fields...)
 	case "completed":
-		bundle, err := r.validateCompletedSession(ctx, input, session)
+		bundle, notes, err := r.validateCompletedSession(ctx, input, session)
 		if err != nil {
 			return r.finishFailure(ctx, input, session, err)
 		}
@@ -669,7 +669,7 @@ func (r *Reconciler) reconcileSession(ctx context.Context, input review.Input, s
 			r.logger.Info("validated Orpheus review bundle", fields...)
 			return nil
 		}
-		if err := r.publisher.Publish(ctx, input, bundle); err != nil {
+		if err := r.publisher.Publish(ctx, input, bundle, notes); err != nil {
 			return r.finishFailure(ctx, input, session, publicationLifecycleError(err))
 		}
 		r.logger.Info("completed GitLab review publication", fields...)
@@ -718,7 +718,11 @@ func (r *Reconciler) finishFailure(ctx context.Context, input review.Input, sess
 	if errors.As(err, &failure) {
 		code = failure.Code
 	}
-	if publishErr := r.publisher.PublishError(ctx, input, publication.Failure{Code: code, SessionID: session.ID}); publishErr != nil {
+	notes, notesErr := r.failureNotes(ctx, input, session)
+	if notesErr != nil {
+		return notesErr
+	}
+	if publishErr := r.publisher.PublishError(ctx, input, publication.Failure{Code: code, SessionID: session.ID, Notes: notes}); publishErr != nil {
 		if errors.Is(publishErr, publication.ErrReviewInactive) {
 			return nil
 		}
@@ -733,9 +737,9 @@ func (r *Reconciler) finishFailure(ctx context.Context, input review.Input, sess
 	return nil
 }
 
-func (r *Reconciler) validateCompletedSession(ctx context.Context, input review.Input, session orpheus.Session) (protocol.Bundle, error) {
+func (r *Reconciler) validateCompletedSession(ctx context.Context, input review.Input, session orpheus.Session) (protocol.Bundle, review.NoteTemplates, error) {
 	if session.AgentStatus != "completed" {
-		return protocol.Bundle{}, lifecycleError(
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(
 			LifecyclePhaseRead,
 			"agent_not_completed",
 			false,
@@ -749,18 +753,18 @@ func (r *Reconciler) validateCompletedSession(ctx context.Context, input review.
 			continue
 		}
 		if afterRun != nil {
-			return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "multiple_after_run_results", false, errors.New("multiple after_run results"))
+			return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, "multiple_after_run_results", false, errors.New("multiple after_run results"))
 		}
 		afterRun = &session.Hooks[i]
 	}
 	if afterRun == nil {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "after_run_missing", false, errors.New("after_run result is missing"))
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, "after_run_missing", false, errors.New("after_run result is missing"))
 	}
 	if afterRun.Status != "completed" || afterRun.ExitCode == nil || *afterRun.ExitCode != 0 {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "after_run_failed", false, fmt.Errorf("after_run status is %q", afterRun.Status))
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, "after_run_failed", false, fmt.Errorf("after_run status is %q", afterRun.Status))
 	}
 	if afterRun.OutputCompleteness != "complete" || afterRun.TruncationReason != "" || afterRun.OutputType != "text" {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "after_run_output_incomplete", false, errors.New("after_run output is not complete text"))
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, "after_run_output_incomplete", false, errors.New("after_run output is not complete text"))
 	}
 
 	metadataRaw, err := r.orpheus.FindMessageMetadata(
@@ -770,21 +774,25 @@ func (r *Reconciler) validateCompletedSession(ctx context.Context, input review.
 		workflow.MessageExternalKey(input.ReviewFingerprint),
 	)
 	if err != nil {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, lifecycleCode(err), retryable(err), err)
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, lifecycleCode(err), retryable(err), err)
 	}
 	metadata, err := workflow.DecodeMetadata(metadataRaw)
 	if err != nil {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "invalid_session_metadata", false, err)
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, "invalid_session_metadata", false, err)
 	}
 	if err := workflow.ValidateMetadata(metadata, input); err != nil {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "session_metadata_mismatch", false, err)
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, "session_metadata_mismatch", false, err)
 	}
 	bundle, err := protocol.Decode([]byte(afterRun.Output), protocol.DefaultLimits(), workflow.ProtocolExpected(metadata))
 	if err != nil {
-		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, protocol.ErrorCode(err), false, err)
+		return protocol.Bundle{}, review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, protocol.ErrorCode(err), false, err)
 	}
 
-	return bundle, nil
+	notes := review.NoteTemplates{}
+	if metadata.Notes != nil {
+		notes = *metadata.Notes
+	}
+	return bundle, notes, nil
 }
 
 func lifecycleError(phase LifecyclePhase, code string, canRetry bool, err error) error {
@@ -834,4 +842,28 @@ func ineligibilityReasons(reasons []review.IneligibilityReason) []string {
 	}
 
 	return values
+}
+
+func (r *Reconciler) failureNotes(ctx context.Context, input review.Input, session orpheus.Session) (review.NoteTemplates, error) {
+	if session.ID == "" {
+		if r.notesForProject != nil {
+			return r.notesForProject(input.MergeRequest.ProjectID), nil
+		}
+		return review.NoteTemplates{}, nil
+	}
+	raw, err := r.orpheus.FindMessageMetadata(ctx, session.ID, session.RunID, workflow.MessageExternalKey(input.ReviewFingerprint))
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return review.NoteTemplates{}, err
+		}
+		if retryable(err) {
+			return review.NoteTemplates{}, lifecycleError(LifecyclePhaseRead, lifecycleCode(err), true, err)
+		}
+		return review.NoteTemplates{}, nil
+	}
+	metadata, err := workflow.DecodeMetadata(raw)
+	if err != nil || workflow.ValidateMetadata(metadata, input) != nil || metadata.Notes == nil {
+		return review.NoteTemplates{}, nil
+	}
+	return *metadata.Notes, nil
 }

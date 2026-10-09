@@ -17,6 +17,9 @@ import (
 var fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type Options struct {
+	Notes              review.NoteTemplates
+	WorkflowID         string
+	Language           string
 	GitLabHost         string
 	Instructions       string
 	AgentProfile       string
@@ -56,13 +59,16 @@ func BuildSessionContract(input review.Input, options Options) (SessionContract,
 		return SessionContract{}, err
 	}
 
-	revision, err := Revision(options.Instructions)
+	revision, err := Revision(options)
 	if err != nil {
 		return SessionContract{}, err
 	}
 	artifactsPath := ".orpheus/reviews/" + input.DiffFingerprint
 	helperSHA256 := helperDigest()
-	metadata := newMetadata(input, options.GitLabHost, artifactsPath, revision, helperSHA256)
+	metadata := newMetadata(input, options.WorkflowID, options.GitLabHost, artifactsPath, revision, helperSHA256)
+	if !options.Notes.Empty() {
+		metadata.Notes = new(options.Notes)
+	}
 	hooks, err := renderHooks(
 		metadata,
 		strings.TrimSpace(input.Project.HTTPURLToRepo),
@@ -96,7 +102,7 @@ func BuildSessionContract(input review.Input, options Options) (SessionContract,
 		Configuration: orpheus.ConfigurationInput{
 			Agent: orpheus.AgentInput{
 				Profile:      options.AgentProfile,
-				Instructions: new(options.Instructions),
+				Instructions: new(agentInstructions(options)),
 			},
 			Sandbox: orpheus.SandboxInput{
 				Template: options.SandboxTemplate,
@@ -117,9 +123,7 @@ func BuildSessionContract(input review.Input, options Options) (SessionContract,
 	if options.AgentModel != "" {
 		request.Configuration.Agent.Model = &options.AgentModel
 	}
-	if len(options.Services) > 0 {
-		request.Configuration.Sandbox.Services = new(append([]string(nil), options.Services...))
-	}
+	request.Configuration.Sandbox.Services = new(append([]string{}, options.Services...))
 
 	encodedRequest, err := json.Marshal(request)
 	if err != nil {
@@ -148,12 +152,21 @@ func MessageExternalKey(reviewFingerprint string) string {
 }
 
 func validateOptions(options Options) (Options, error) {
+	if err := options.Notes.Validate(); err != nil {
+		return Options{}, fmt.Errorf("build session contract: %w", err)
+	}
 	options.GitLabHost = strings.TrimRight(strings.TrimSpace(options.GitLabHost), "/")
 	options.AgentProfile = strings.TrimSpace(options.AgentProfile)
 	options.AgentModel = strings.TrimSpace(options.AgentModel)
 	options.SandboxTemplate = strings.TrimSpace(options.SandboxTemplate)
 
 	switch {
+	case !ValidID(options.WorkflowID):
+		return Options{}, errors.New("build session contract: valid workflow ID is required")
+	case options.Language != "" && !languagePattern.MatchString(options.Language):
+		return Options{}, errors.New("build session contract: invalid language tag")
+	case options.Services == nil:
+		return Options{}, errors.New("build session contract: services must be explicitly configured")
 	case options.GitLabHost == "":
 		return Options{}, errors.New("build session contract: GitLab host is required")
 	case strings.TrimSpace(options.Instructions) == "":
@@ -208,10 +221,10 @@ func validateInput(input review.Input) error {
 	return nil
 }
 
-func newMetadata(input review.Input, host, artifactsPath, revision, helperSHA256 string) MetadataV1 {
+func newMetadata(input review.Input, workflowID, host, artifactsPath, revision, helperSHA256 string) MetadataV1 {
 	return MetadataV1{
 		SchemaVersion:    MetadataSchemaVersion,
-		WorkflowID:       ID,
+		WorkflowID:       workflowID,
 		WorkflowRevision: revision,
 		GitLab: GitLabMetadata{
 			Host:             host,
@@ -293,4 +306,11 @@ func renderPrompt(input review.Input, artifactsPath string) (string, error) {
 	}
 
 	return rendered.String(), nil
+}
+
+func agentInstructions(options Options) string {
+	if options.Language == "" {
+		return options.Instructions
+	}
+	return options.Instructions + "\n\nReview output language: " + options.Language + ". Use this language for the final response, finding titles and bodies, recommendations, resolution explanations and recurrence comments. Keep protocol field names, enum values and markers unchanged.\n"
 }

@@ -54,12 +54,17 @@ func ValidateMetadata(metadata MetadataV1, input review.Input) error {
 // an existing review session without requiring its current GitLab state to
 // still match the reviewed diff.
 func ValidateRecoveredMetadata(metadata MetadataV1, mrKey, reviewFingerprint string, reviewerID int64) error {
+	if metadata.Notes != nil {
+		if err := metadata.Notes.Validate(); err != nil {
+			return fmt.Errorf("validate workflow metadata: %w", err)
+		}
+	}
 	expectedMRKey := fmt.Sprintf("%s:%d!%d", metadata.GitLab.Host, metadata.GitLab.ProjectID, metadata.GitLab.MergeRequestIID)
 	switch {
 	case metadata.SchemaVersion != MetadataSchemaVersion:
 		return errors.New("validate workflow metadata: unsupported schema version")
-	case metadata.WorkflowID != ID:
-		return errors.New("validate workflow metadata: workflow ID mismatch")
+	case !ValidID(metadata.WorkflowID):
+		return errors.New("validate workflow metadata: invalid workflow ID")
 	case !digestPattern.MatchString(metadata.WorkflowRevision):
 		return errors.New("validate workflow metadata: invalid workflow revision")
 	case metadata.Protocol.ArtifactSchemaVersion != ArtifactSchemaVersion:

@@ -55,9 +55,9 @@ func findingBody(finding protocol.Finding, marker string) string {
 
 func completionBody(count int, marker string) string {
 	if count == 0 {
-		return "The current merge request version was reviewed and no findings were confirmed.\n\nAutomated review is not an approval and does not replace human review of business logic and architecture.\n\n" + marker
+		return "✅ The current merge request version was reviewed and no findings were confirmed.\n\nAutomated review is not an approval and does not replace human review of business logic and architecture.\n\n" + marker
 	}
-	return fmt.Sprintf("Review of the current merge request version is complete. Confirmed findings: %d.\n\nAutomated review is not an approval and does not replace human review of business logic and architecture.\n\n%s", count, marker)
+	return fmt.Sprintf("✅ Review of the current merge request version is complete. Confirmed findings: %d.\n\nAutomated review is not an approval and does not replace human review of business logic and architecture.\n\n%s", count, marker)
 }
 
 func hasOwnedMarker(discussions []gitlab.Discussion, reviewerID int64, marker string) bool {
@@ -134,4 +134,8 @@ func hasReviewer(reviewers []gitlab.User, reviewerID int64) bool {
 
 func normalize(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func SkippedMarker(assignmentKey string) string {
+	return "<!-- orpheus-review-skipped:" + markerHash("v1\x00"+assignmentKey) + " -->"
 }

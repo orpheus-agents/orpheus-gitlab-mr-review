@@ -44,8 +44,8 @@ and GitLab.
 
 ### 3.1 Startup and polling
 
-Startup validates configuration, loads mounted Markdown instructions, constructs the GitLab and
-Orpheus clients, and starts `Watcher.Run(ctx)` and `Reconciler.Run(ctx)` concurrently. The watcher
+Startup validates configuration, loads and validates all Markdown workflows from `WORKFLOWS_DIR`,
+constructs the GitLab and Orpheus clients, and starts `Watcher.Run(ctx)` and `Reconciler.Run(ctx)` concurrently. The watcher
 resolves the authenticated GitLab user before its first poll.
 
 The watcher performs one immediate poll and then polls every `POLL_INTERVAL_SECONDS`. Each successful
@@ -60,8 +60,9 @@ The GitLab adapter reads the merge request before and after the related requests
 invalidates the candidate, so mixed control-plane state is never submitted. A failure for any candidate
 discards the whole tick. Snapshot submission is non-blocking; a full queue defers work to a later poll.
 
-Project scope is determined by GitLab access and explicit reviewer assignment. There is no project
-allowlist.
+GitLab access and explicit reviewer assignment determine polling scope. Workflow `project_ids` select
+the instructions and environment for new analyses; a workflow without `project_ids` is the fallback.
+Overlapping selectors, duplicate IDs and multiple fallbacks fail startup. A missing fallback is allowed.
 
 ### 3.2 Identity and eligibility
 
@@ -95,7 +96,9 @@ The admission phase then inspects current candidates with a bounded worker pool.
 1. completes any terminal lifecycle already recorded by a GitLab marker;
 2. searches for an exact Session by namespace, merge request key, and review fingerprint;
 3. checks the latest Session for the merge request to prevent an unintended second analysis;
-4. creates a Session only when no existing lifecycle owns the assignment and capacity is available.
+4. selects a workflow by project ID only when no existing lifecycle owns the assignment;
+5. publishes a skip note and removes the bot when no workflow matches, otherwise creates a Session
+   when global capacity is available.
 
 `MAX_CONCURRENT_REVIEWS` limits active review Sessions. Excess candidates remain assigned and are
 reconsidered later. A stable `Idempotency-Key` protects `CreateSession` against a lost or uncertain
@@ -109,18 +112,30 @@ Every review uses one Session with `allow_multiple_runs=false`. The immutable re
 
 - workflow namespace, merge request key, and review fingerprint;
 - one initial message with metadata schema v1;
-- the embedded English prompt and mounted user instructions;
-- agent profile, optional model, and sandbox template;
+- the embedded MR context and agent execution/artifact/publication contract, plus the selected workflow instructions;
+- the workflow's agent profile, optional model, sandbox template and explicit services;
+- an optional output language directive for agent-authored text;
+- optional success and failure publication templates saved in message metadata;
 - `before_run` and `after_run` hooks;
 - run and hook timeouts.
 
-Metadata binds the Session to GitLab identity, reviewer ID, diff refs, fingerprints, workflow revision,
-protocol versions, artifact path, and helper digest. Oversized requests are rejected before any
+Metadata binds the Session to GitLab identity, reviewer ID, diff refs, fingerprints, workflow ID and
+revision, protocol versions, artifact path, and helper digest. Oversized requests are rejected before any
 Orpheus mutation.
+
+Optional `notes.success` and `notes.fail` are connector-owned publication settings. They are not agent
+instructions. Their exact text contributes to the workflow revision and is saved in the initial
+metadata, so accepted-session publication uses its original templates after restart or configuration
+changes. Metadata without notes remains valid and uses the English service defaults. Before a session
+is accepted, a preparation failure uses the selected workflow's current failure template.
 
 `before_run` prepares a detached checkout at the pinned head SHA, verifies the embedded helper, and
 creates the artifact contract. The agent writes review artifacts inside the sandbox. `after_run`
 verifies the helper again and emits one compact result envelope through hook stdout.
+
+The base prompt requires unattended operation, reading the pinned diff, recording blocking checks,
+verifying findings and moving them to their final artifact directories. Workflow bodies define
+project review criteria, checks, requirement sources and how to evaluate previous findings.
 
 ### 3.5 Result validation
 
@@ -145,9 +160,11 @@ The publisher creates inline discussions, falls back to regular notes for confir
 publishes recommendations, applies bot-owned resolutions, writes a completion note, and removes only
 the bot reviewer.
 
-Every finding, recommendation, resolution, completion, and error mutation has a deterministic hidden
+Every finding, recommendation, resolution, completion, error and skip mutation has a deterministic hidden
 marker. The connector checks markers before a mutation and after an uncertain response. Reviewer
-removal occurs only after a completion or error marker is confirmed.
+removal occurs only after a completion, error or skip marker is confirmed. Skip markers bind to the
+reviewer assignment rather than the changing review fingerprint, so unrelated human activity cannot
+restart a skipped request or duplicate its note while reviewer removal is pending.
 
 For a recurring finding linked to a bot-owned discussion:
 
@@ -186,11 +203,13 @@ After restart, the connector uses:
 - exact and latest Session lookup by merge request identity;
 - immutable message metadata;
 - terminal HookResult data;
-- GitLab publication and error markers.
+- GitLab publication, error and skip markers.
 
 This restores active-run monitoring, stale cancellation, partial publication, error publication, and
-pending reviewer removal. It also handles an active Session whose reviewer was removed before the
-first new snapshot.
+pending reviewer removal. Recovery uses the saved workflow ID and revision rather than current
+workflow definitions: changes to instructions, project routing or workflow removal do not alter accepted
+sessions and never authorize another analysis. It also handles an active Session whose reviewer was
+removed before the first new snapshot.
 
 ## 5. Concurrency and shutdown
 
@@ -214,14 +233,19 @@ overlapping instances are unsupported.
 - Sandbox repository and `glab` access are supplied by the Orpheus sandbox template and must be
   read-only.
 - The prompt forbids agent-side GitLab mutations; the connector performs all mutations.
-- User instruction files must be regular, non-empty UTF-8 Markdown files and are loaded once at
-  startup in configured order.
+- Workflow files must be regular UTF-8 Markdown files with valid front matter and non-empty bodies.
+  All are validated once at startup, with atomic failure for invalid or ambiguous configuration.
 
 ## 7. Operational constraints
 
 - Polling is the only event source.
 - Only one connector process may be active for one GitLab installation and bot identity.
-- The workflow is embedded and cannot be reloaded at runtime.
+- User workflow definitions reload only after a process restart. The base MR prompt and agent
+  execution/artifact contract remain embedded; project review criteria come from workflows.
+- `language` is optional and affects agent-authored output only. Default service messages are English;
+  optional success/failure templates publish user-provided text without translation. The skip note
+  remains a service default because no workflow matches that project.
+- Timeouts, workers, queue capacity and concurrency limits remain service settings shared by workflows.
 - Sessions are one-shot; automatic analysis retry and reusable Sessions are unsupported.
 - Transient lifecycle retries happen on a later poll; there is no independent retry scheduler.
 - Detection of a new reviewer assignment currently relies on GitLab system-note text.
@@ -235,7 +259,7 @@ overlapping instances are unsupported.
 3. A lifecycle retry does not create another analysis for an existing Session.
 4. Only validated `after_run` output can reach GitLab.
 5. GitLab mutations are idempotent or verified from current GitLab state.
-6. Reviewer removal requires a confirmed completion or error marker, except when discarding a stale
+6. Reviewer removal requires a confirmed completion, error or skip marker, except when discarding a stale
    review request.
 7. Human reviewers and discussions not owned by the bot are not modified.
 8. Process restart does not cancel an active Orpheus Run.

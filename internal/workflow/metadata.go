@@ -1,7 +1,8 @@
 package workflow
 
+import "github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
+
 const (
-	ID                    = "gitlab-mr-review"
 	Namespace             = "gitlab/mr-review"
 	MetadataSchemaVersion = 1
 	ArtifactSchemaVersion = 1
@@ -9,13 +10,14 @@ const (
 )
 
 type MetadataV1 struct {
-	SchemaVersion    int              `json:"schema_version"`
-	WorkflowID       string           `json:"workflow_id"`
-	WorkflowRevision string           `json:"workflow_revision"`
-	GitLab           GitLabMetadata   `json:"gitlab"`
-	Review           ReviewMetadata   `json:"review"`
-	DiffRefs         DiffRefsMetadata `json:"diff_refs"`
-	Protocol         ProtocolMetadata `json:"protocol"`
+	Notes            *review.NoteTemplates `json:"notes,omitempty"`
+	SchemaVersion    int                   `json:"schema_version"`
+	WorkflowID       string                `json:"workflow_id"`
+	WorkflowRevision string                `json:"workflow_revision"`
+	GitLab           GitLabMetadata        `json:"gitlab"`
+	Review           ReviewMetadata        `json:"review"`
+	DiffRefs         DiffRefsMetadata      `json:"diff_refs"`
+	Protocol         ProtocolMetadata      `json:"protocol"`
 }
 
 type GitLabMetadata struct {

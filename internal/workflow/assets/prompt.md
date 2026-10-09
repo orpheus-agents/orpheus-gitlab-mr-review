@@ -1,4 +1,4 @@
-Review GitLab merge request `!{{ .MergeRequestIID }}` in project `{{ .ProjectPath }}`.
+Review GitLab merge request `!{{ .MergeRequestIID }}` in project `{{ .ProjectPath }}` using the configured workflow instructions.
 
 ## Immutable session context
 
@@ -25,15 +25,21 @@ Review GitLab merge request `!{{ .MergeRequestIID }}` in project `{{ .ProjectPat
 
 1. This is an unattended session. Do not ask the user questions or wait for interactive input.
 2. Read and modify project files only inside the provided workspace.
-3. GitLab mutations are forbidden. You may use `glab` only for read-only requests. The connector
-   owns comments, discussions, resolution, approval, and reviewer changes.
-4. Use Git only inside the current checkout. Do not switch the checkout to another commit.
-5. Never print or write tokens, SSH keys, or other secrets.
-6. Do not expand the scope. Review only the pinned diff described by this prompt and environment.
-7. Do not install plugins or request approval to install them. If a required check cannot run,
+3. Use Git only inside the current checkout. Do not switch the checkout to another commit.
+4. Never print or write tokens, SSH keys, or other secrets.
+5. Review only the pinned diff described by this prompt and environment.
+6. Do not install plugins or request approval to install them. If a required check cannot run,
    record the exact reason without requesting interactive help.
 
+GitLab mutations are forbidden. The connector owns comments, discussions, resolution, approval
+and reviewer changes. GitLab metadata, notes and discussions may be read through `glab` in read-only
+mode.
+
 ## Pinned diff
+
+The checkout is prepared at the pinned head SHA. Review artifacts refer to the pinned diff above;
+newer branch state cannot replace these refs. The environment exposes these same SHAs as
+`ORPHEUS_GITLAB_DIFF_BASE_SHA`, `ORPHEUS_GITLAB_DIFF_START_SHA` and `ORPHEUS_GITLAB_DIFF_HEAD_SHA`.
 
 Always start with:
 
@@ -43,7 +49,8 @@ git log "$ORPHEUS_GITLAB_DIFF_BASE_SHA".."$ORPHEUS_GITLAB_DIFF_HEAD_SHA" --oneli
 ```
 
 If the refs cannot be resolved or the diff cannot be reviewed, do not report a false clean result.
-Record an unfinished finding with the blocking reason. The validation hook will fail the workflow.
+Record an unfinished finding in `findings/` with the blocking reason and leave it unresolved so
+the validation hook fails the workflow. Never report an incomplete required check as a clean result.
 
 When needed, read current merge request metadata, notes, and discussions through `glab` in read-only
 mode. Code analysis and findings must still refer only to the pinned diff. Do not substitute newer
@@ -51,18 +58,20 @@ branch state for the pinned SHAs.
 
 ## Review artifacts
 
-Work only in `{{ .ArtifactsPath }}`:
+The connector consumes Markdown files under `{{ .ArtifactsPath }}`:
+The environment exposes this directory as `ORPHEUS_GITLAB_REVIEW_DIR`. Keep all review artifacts
+inside this directory.
 
 ```text
-findings/
-confirmed/
-rejected/
-recommendations/
-resolutions/
+findings/          unfinished findings (must be empty at successful completion)
+confirmed/         findings to publish
+rejected/          rejected findings (not published)
+recommendations/   Markdown recommendations to publish
+resolutions/       resolution intents for previous Orpheus findings
 ```
 
-Write every potential finding immediately as a separate Markdown file in `findings/`. Use this
-required format:
+Write every potential finding immediately as a separate Markdown file in `findings/` using this
+schema. The same schema applies to files in `confirmed/` and `rejected/`:
 
 ```md
 ---
@@ -79,29 +88,31 @@ A self-contained explanation of the problem, evidence, checks performed, and the
 
 Every finding requires a unique `id`, a repository-relative `path`, a positive line number in the
 new version, `severity` (`info`, `warning`, or `error`), `title`, `source`, and a non-empty body.
+A rejected finding's body includes its rejection reason. Invalid or unfinished artifacts fail
+validation; they cannot be published as a successful partial result.
 
-If a confirmed finding is the same issue as an Orpheus finding from an earlier review, add all four
-fields below to its front matter. Copy the discussion, exact note, and exact trailing marker from
-GitLab. Write a concise, finding-specific `recurrence_comment` explaining what you rechecked, why
-the defect still exists, and what still has to be fixed. Do not use a stock sentence.
+After the initial analysis, verify every finding again against the pinned diff and surrounding code.
+Then atomically move it to `confirmed/` if the issue is valid, or to `rejected/` if it is not. Include
+the exact rejection reason. Leave blocked findings in `findings/`; this directory must be empty
+before successful completion.
+
+To associate a confirmed finding with the same issue in an earlier Orpheus review, include all
+four fields below. Copy the discussion ID, exact note ID and exact trailing marker from a note
+authored by the configured reviewer. `recurrence_comment` is the explanation to publish in that
+thread. The connector handles thread reuse, reopening and outdated positions.
+Write a concise, finding-specific `recurrence_comment` explaining what you rechecked, why the
+defect still exists, and what still has to be fixed. Do not use a stock sentence.
 
 ```md
 previous_discussion_id: discussion-id
 previous_note_id: 123
 previous_marker: "<!-- orpheus-review-finding:... -->"
-recurrence_comment: "The nil path is still reachable from ParseConfig; guard the lookup before dereferencing it."
+recurrence_comment: "Explanation of the recurring finding."
 ```
 
-After the initial analysis, verify every finding again against the pinned diff and surrounding code.
-Then atomically move it to `confirmed/` if the issue is valid, or to `rejected/` if it is not. Add the
-exact rejection reason to every rejected finding. `findings/` must be empty before successful
-completion. An invalid or unfinished finding fails the workflow instead of producing partial output.
-
-Store important rules that should be documented as separate files in `recommendations/`. Do not
-modify the target repository documentation only to record such a recommendation during review.
-
-Create a resolution only for an Orpheus finding whose cause is demonstrably fixed in the pinned
-diff. Store the intent in `resolutions/`:
+Recommendation files contain non-empty Markdown bodies without finding front matter.
+Resolution files use this schema; the referenced note must be a resolvable Orpheus finding with
+an exact trailing marker, authored by the configured reviewer:
 
 ```md
 ---
@@ -110,33 +121,20 @@ note_id: 123
 marker: "<!-- orpheus-review-finding:... -->"
 ---
 
-The verified path and line, the cause of the original finding, and evidence that it is fixed.
+An explanation and evidence for resolving the finding.
 ```
 
-Do not create resolutions for another author's discussion, a discussion without an Orpheus marker,
-or a change without evidence. The connector independently verifies author identity, the marker, and
-the current diff.
-
-## Existing discussions
-
-Use discussions read through `glab` to verify previous findings. For every previous Orpheus finding:
-
-- If it still reproduces, create a confirmed finding at its current diff position and include the
-  complete previous-finding reference above. Do this whether the old thread is open, manually
-  resolved, or automatically made outdated. The connector decides whether to retain, reopen, or
-  replace that thread without creating a semantic duplicate.
-- If it was explicitly resolved by a person with an explanation that accepts the risk or rejects
-  the finding, do not recreate or reopen it unless new evidence makes it a materially different
-  defect.
-- If its cause is fixed, create a resolution intent only when the thread is still open.
-
-Do not reply in GitLab or mutate discussions yourself. Never claim a previous marker that is not an
-exact trailing marker on a note authored by the configured reviewer account.
+Create a resolution intent only when the previous finding's cause is demonstrably fixed in the
+pinned diff and the thread is still open. Include the verified path and line, the cause of the
+original finding, and evidence that it is fixed. Do not create resolutions for another author's
+discussion, a discussion without an Orpheus marker, or a change without evidence. The connector
+independently verifies author identity, the marker, and the current diff.
 
 ## Completion
 
 The final response is only for the session log and is not a publication channel for findings.
 Briefly state that the artifacts for the current diff fingerprint were verified. Do not return final
-JSON, publish anything to GitLab, or claim that the merge request is approved. The validation hook
-validates the artifacts, and the connector independently validates the bundle and performs
-idempotent publication and lifecycle operations.
+JSON, publish anything to GitLab, or claim that the merge request is approved.
+The validation hook packs the artifacts. The connector independently validates the resulting
+bundle and performs idempotent publication and reviewer removal. Preserve the generated
+`contract.json`; its identities and schema versions bind artifacts to this session.

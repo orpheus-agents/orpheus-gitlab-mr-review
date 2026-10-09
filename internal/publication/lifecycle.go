@@ -14,6 +14,7 @@ import (
 // Failure contains only a classification and a public session identity. Raw
 // errors, hook output, and credentials must never reach the GitLab note.
 type Failure struct {
+	Notes     review.NoteTemplates
 	Code      string
 	SessionID string
 }
@@ -32,7 +33,8 @@ func (p *Publisher) Finalize(ctx context.Context, input review.Input) (bool, err
 		return false, err
 	}
 	if !hasOwnedMarker(discussions, input.Reviewer.ID, CompletionMarker(input.ReviewFingerprint)) &&
-		!hasOwnedMarker(discussions, input.Reviewer.ID, ErrorMarker(input.ReviewFingerprint)) {
+		!hasOwnedMarker(discussions, input.Reviewer.ID, ErrorMarker(input.ReviewFingerprint)) &&
+		!hasOwnedMarker(discussions, input.Reviewer.ID, SkippedMarker(review.AssignmentKey(input))) {
 		return false, nil
 	}
 	return true, p.removeReviewer(ctx, input)
@@ -47,9 +49,16 @@ func (p *Publisher) PublishError(ctx context.Context, input review.Input, failur
 		return err
 	}
 	marker := ErrorMarker(input.ReviewFingerprint)
-	body := "Automated review could not be completed: " + safeFailureReason(failure.Code) + "."
+	body := "⚠️ Automated review could not be completed: " + safeFailureReason(failure.Code) + "."
 	if link := p.sessionURL(failure.SessionID); link != "" {
 		body += "\n\n[Review details in Orpheus](" + link + ")"
+	}
+	if failure.Notes.Fail != "" {
+		rendered, err := review.RenderNote(failure.Notes.Fail, review.NoteData{Reason: safeFailureReason(failure.Code), SessionURL: p.sessionURL(failure.SessionID)})
+		if err != nil {
+			return permanent("invalid_failure_note", err)
+		}
+		body = rendered
 	}
 	discussions, err = p.ensureNote(ctx, input, body+"\n\n"+marker, marker, discussions)
 	if err != nil {
@@ -155,4 +164,25 @@ func safeFailureReason(code string) string {
 	default:
 		return "the review result could not be safely validated or published"
 	}
+}
+
+// PublishSkipped records the decision durably before removing the bot reviewer.
+func (p *Publisher) PublishSkipped(ctx context.Context, input review.Input) error {
+	if finalized, err := p.Finalize(ctx, input); err != nil || finalized {
+		return err
+	}
+	discussions, err := p.refreshDiscussions(ctx, input)
+	if err != nil {
+		return err
+	}
+	marker := SkippedMarker(review.AssignmentKey(input))
+	body := "⏭️ Automated review was skipped: no workflow is configured for this project.\n\n" + marker
+	discussions, err = p.ensureNote(ctx, input, body, marker, discussions)
+	if err != nil {
+		return err
+	}
+	if !hasOwnedMarker(discussions, input.Reviewer.ID, marker) {
+		return unconfirmed("skipped_marker_missing")
+	}
+	return p.removeReviewer(ctx, input)
 }
