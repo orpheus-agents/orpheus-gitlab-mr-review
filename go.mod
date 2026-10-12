@@ -1,6 +1,6 @@
 module github.com/orpheus-agents/orpheus-gitlab-mr-review
 
-go 1.27.0
+go 1.27.2
 
 require (
 	github.com/google/uuid v1.6.0
@@ -8,8 +8,8 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.12.1
 	gitlab.com/gitlab-org/api/client-go/v3 v3.15.0
-	go.yaml.in/yaml/v3 v3.0.5
 	go.uber.org/zap v1.28.0
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (

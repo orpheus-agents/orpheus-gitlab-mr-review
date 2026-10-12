@@ -197,7 +197,7 @@ connector env variables are no longer read.
 
 ## Run locally
 
-Go 1.27 or newer is required.
+Use the Go version declared in [go.mod](go.mod) or newer.
 
 ```shell
 go run .
