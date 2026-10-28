@@ -228,8 +228,8 @@ func TestWatcherLetsInFlightPollFinishDuringShutdown(t *testing.T) {
 		stopDone <- watcher.Stop(shutdownCtx)
 	}()
 	select {
-	case <-stopDone:
-		t.Fatal("watcher stopped before the in-flight poll completed")
+	case err := <-stopDone:
+		t.Fatalf("watcher stopped before the in-flight poll completed: %v", err)
 	default:
 	}
 	close(release)

@@ -1042,8 +1042,8 @@ func TestReconcilerGracefulShutdownDrainsAcceptedInputs(t *testing.T) {
 		stopDone <- reconciler.Stop(shutdownCtx)
 	}()
 	select {
-	case <-stopDone:
-		t.Fatal("reconciler stopped before the accepted input completed")
+	case err := <-stopDone:
+		t.Fatalf("reconciler stopped before the accepted input completed: %v", err)
 	default:
 	}
 	close(release)
