@@ -73,6 +73,11 @@ resolutions/       resolution intents for previous Orpheus findings
 Write every potential finding immediately as a separate Markdown file in `findings/` using this
 schema. The same schema applies to files in `confirmed/` and `rejected/`:
 
+Finding filenames must match `F-[0-9]{4,}.md`: `F-` followed by at least four digits and `.md`,
+with no descriptive suffix. The filename without `.md` must exactly match the front matter `id`:
+for `id: F-0001`, use `F-0001.md`, never `F-0001-page-range.md`. Preserve this filename when moving
+the finding between `findings/`, `confirmed/` and `rejected/`.
+
 ```md
 ---
 id: F-0001
