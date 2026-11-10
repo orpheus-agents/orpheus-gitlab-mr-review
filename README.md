@@ -255,3 +255,8 @@ operations and diagnostics.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for lifecycle, idempotency, stale-result handling, and restart
 recovery details.
+
+## License
+
+Licensed under the GNU Affero General Public License, version 3 only
+(`AGPL-3.0-only`). See [LICENSE](LICENSE).
