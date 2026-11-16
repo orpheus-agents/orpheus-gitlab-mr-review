@@ -13,7 +13,7 @@ services:
             traefik.http.routers.app.entrypoints: web
 
     golang:
-        image: golang:1.27.3
+        image: golang:1.27.4
         working_dir: /var/app
         env_file: .env
         volumes:
