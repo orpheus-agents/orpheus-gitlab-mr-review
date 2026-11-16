@@ -25,7 +25,7 @@ vet:
 lint:
 	@docker run --rm -v $(ROOT_DIR):/var/app -w /var/app golangci/golangci-lint:v2.15.0 golangci-lint run ./...
 
-test: up migrate
+test: .env
 	@echo "==> Running go test"
 	@docker compose run --rm golang go test -coverprofile test.cov -v -short -cover -race ./...
 	@docker compose run --rm golang go tool cover -func test.cov
