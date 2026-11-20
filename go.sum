@@ -37,8 +37,8 @@ github.com/oapi-codegen/nullable v1.1.0 h1:eAh8JVc5430VtYVnq00Hrbpag9PFRGWLjxR1/
 github.com/oapi-codegen/nullable v1.1.0/go.mod h1:KUZ3vUzkmEKY90ksAmit2+5juDIhIZhfDl+0PwOQlFY=
 github.com/oapi-codegen/runtime v1.8.0 h1:RJzEgQSJQADEPaG1cYuSCKYai/cCVRE2xnkrqhJs/3c=
 github.com/oapi-codegen/runtime v1.8.0/go.mod h1:GwV7hC2hviaMzj+ITfHVRESK5J2W/GefVwIND/bMGvU=
-github.com/orpheus-agents/orpheus v0.6.7 h1:ocFRMv/YIsMgLf1K0nMOK8ifkUNeCGYzw5CA81unULk=
-github.com/orpheus-agents/orpheus v0.6.7/go.mod h1:ZQ1TbO48VOagi4NYQxdLDa//e7EQUe5t9/cLspLjyFw=
+github.com/orpheus-agents/orpheus v0.18.0 h1:Hyk5oMovDzxRtSng5/iCR7ccnSP23MS2L8bD06h5gGU=
+github.com/orpheus-agents/orpheus v0.18.0/go.mod h1:Y5YxI5unckQhi0UEQ2gXADmOPGc/25Cvl3TSTRwng10=
 github.com/pelletier/go-toml/v2 v2.4.3 h1:GTRvJQutkOSftxIFD5xw9aepkYNuPWmVJpffdDPYVpY=
 github.com/pelletier/go-toml/v2 v2.4.3/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=

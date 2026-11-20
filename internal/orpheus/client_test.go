@@ -100,7 +100,8 @@ func TestListActiveSessionsReadsLatestRunAndProjectsRecoveryIdentity(t *testing.
 			_, _ = io.WriteString(response, `{
 				"items":[{
 					"id":"00000000-0000-4000-8000-000000000001",
-					"last_run_id":"00000000-0000-4000-8000-000000000002",
+					"configuration":{"sandbox":{"services":["gitlab"],"env_names":[],"env_from":[]}},
+                    "last_run_id":"00000000-0000-4000-8000-000000000002",
 					"external_key":"https://gitlab.example.com:42!17",
 					"allow_multiple_runs":false,
 					"status":"running",
@@ -115,7 +116,8 @@ func TestListActiveSessionsReadsLatestRunAndProjectsRecoveryIdentity(t *testing.
 				"id":"00000000-0000-4000-8000-000000000002",
 				"session_id":"00000000-0000-4000-8000-000000000001",
 				"status":"running",
-				"input_fingerprint":"review-fingerprint",
+				"services":["gitlab-registry"],"env_from":[],"env_names":[],"harness_env_names":["GITLAB_TOKEN"],
+                "input_fingerprint":"review-fingerprint",
 				"created_at":"2026-10-02T10:00:00Z"
 			}`)
 		default:
@@ -165,6 +167,7 @@ func TestFindSessionsProjectsAgentAndHookResults(t *testing.T) {
 				"session_id":"00000000-0000-4000-8000-000000000001",
 				"status":"completed",
 				"agent_status":"completed",
+                "services":["gitlab-registry"],"env_names":[],"env_from":[],"harness_env_names":["GITLAB_TOKEN"],
 				"error":{"code":"run_failed","message":"Run failure"},
 				"agent_error":{"code":"harness_failed","message":"Selected model is at capacity"},
 				"input_fingerprint":"review-fingerprint",
@@ -172,6 +175,7 @@ func TestFindSessionsProjectsAgentAndHookResults(t *testing.T) {
 				"hooks":[{
 					"id":"00000000-0000-4000-8000-000000000004",
 					"name":"after_run",
+                    "env_names":["GITLAB_REGISTRY_TOKEN"],
 					"status":"completed",
 					"exit_code":0,
 					"error":{"code":"hook_failed","message":"Hook execution failed"},

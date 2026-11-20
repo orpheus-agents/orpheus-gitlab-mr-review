@@ -127,7 +127,7 @@ variables. `profile`, `sandbox_template` and service codes must already exist in
 are rejected by its API. `services` is sent as `configuration.sandbox.services`, including an explicit
 empty list. Service codes start with a lowercase letter, contain lowercase letters, digits, `_` or `-`,
 and are at most 64 characters long. Service credentials and repository access are supplied by Orpheus;
-the connector's `GITLAB_TOKEN` is not copied to the agent. Service selection requires Orpheus v0.6.0 or
+the connector's `GITLAB_TOKEN` is not copied to the agent. This connector requires Orpheus v0.18.0 or
 later.
 
 The Markdown body is passed as agent instructions and replaces the profile's instructions. The
